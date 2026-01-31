@@ -55,7 +55,6 @@ def normalize_rows(values):
 
     out = []
     for row in values[1:]:
-        # pad row
         while len(row) < len(header):
             row.append("")
 
@@ -92,4 +91,5 @@ def cards():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=True)
