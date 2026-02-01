@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-type Card = {
+type CardRow = {
   id: string;
   question: string;
   answer: string;
@@ -10,14 +10,27 @@ type Card = {
 
 type Team = {
   name: string;
-  color: string; // hex like #22c55e
+  color: string; // hex
   score: number;
 };
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000";
+type Side = "Q" | "A";
 
-function shuffle<T>(arr: T[]): T[] {
+type Tile = {
+  key: string; // unique per tile instance (Q-idx or A-idx)
+  id: string; // shared match id across Q and A
+  side: Side;
+  text: string;
+  index: number;
+};
+
+function clampHexColor(input: string) {
+  const s = input.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s;
+  return "#7c3aed"; // fallback purple
+}
+
+function shuffle<T>(arr: T[]) {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -26,576 +39,582 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-function hexToRgba(hex: string, alpha: number): string {
-  const h = hex.replace("#", "").trim();
-  const full =
-    h.length === 3
-      ? h
-          .split("")
-          .map((c) => c + c)
-          .join("")
-      : h.padEnd(6, "0").slice(0, 6);
-
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+function lighten(hex: string, amt = 0.85) {
+  // amt 0..1 => closer to white
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  const nr = Math.round(r + (255 - r) * amt);
+  const ng = Math.round(g + (255 - g) * amt);
+  const nb = Math.round(b + (255 - b) * amt);
+  const toHex = (n: number) => n.toString(16).padStart(2, "0");
+  return `#${toHex(nr)}${toHex(ng)}${toHex(nb)}`;
 }
 
 export default function MemoryGame() {
-  const [allCards, setAllCards] = useState<Card[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const API_BASE =
+    process.env.NEXT_PUBLIC_API_BASE_URL?.trim() || "http://localhost:5000";
 
-  // Game setup
-  const [started, setStarted] = useState(false);
+  // --- setup / pre-game ---
+  const [setupTeam1Name, setSetupTeam1Name] = useState("Team 1");
+  const [setupTeam2Name, setSetupTeam2Name] = useState("Team 2");
+  const [setupTeam1Color, setSetupTeam1Color] = useState("#22c55e"); // green
+  const [setupTeam2Color, setSetupTeam2Color] = useState("#7c3aed"); // purple
+  const [setupFirst, setSetupFirst] = useState<0 | 1>(0);
+  const [isGameStarted, setIsGameStarted] = useState(false);
+
+  // --- data ---
+  const [rows, setRows] = useState<CardRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [fetchErr, setFetchErr] = useState<string | null>(null);
+
+  // --- game state ---
   const [teams, setTeams] = useState<Team[]>([
     { name: "Team 1", color: "#22c55e", score: 0 },
-    { name: "Team 2", color: "#a855f7", score: 0 },
+    { name: "Team 2", color: "#7c3aed", score: 0 },
   ]);
-  const [startingTeamIndex, setStartingTeamIndex] = useState(0);
+  const [activeTeam, setActiveTeam] = useState<0 | 1>(0);
 
-  // Round state (15 pairs)
-  const [questionOrder, setQuestionOrder] = useState<Card[]>([]);
-  const [answerOrder, setAnswerOrder] = useState<Card[]>([]);
+  const [selectedQ, setSelectedQ] = useState<Tile | null>(null);
+  const [selectedA, setSelectedA] = useState<Tile | null>(null);
 
-  // Reveal + matching state
-  const [revealedQuestionId, setRevealedQuestionId] = useState<string | null>(
+  const [matchedKeys, setMatchedKeys] = useState<Map<string, number>>(
+    () => new Map()
+  ); // tile.key -> teamIndex
+
+  // mismatch countdown (5s), pausable if zoom overlay is open
+  const [mismatchRemainingMs, setMismatchRemainingMs] = useState<number | null>(
     null
   );
-  const [revealedAnswerId, setRevealedAnswerId] = useState<string | null>(null);
+  const mismatchIntervalRef = useRef<number | null>(null);
+  const mismatchStartRef = useRef<number | null>(null);
+  const mismatchDurationRef = useRef<number>(5000);
 
-  // matched IDs -> team index that won the match
-  const [matchedById, setMatchedById] = useState<Record<string, number>>({});
+  // zoom overlay
+  const [zoomed, setZoomed] = useState<Tile | null>(null);
 
-  const [currentTeamIndex, setCurrentTeamIndex] = useState(0);
-  const [busy, setBusy] = useState(false); // prevent clicks during flip-back delay
+  // Build 15 Q tiles and 15 A tiles (shuffle each column independently)
+  const { qTiles, aTiles } = useMemo(() => {
+    const take = rows.slice(0, 15);
+    const qs: Tile[] = take.map((r, idx) => ({
+      key: `Q-${idx}`,
+      id: String(r.id),
+      side: "Q",
+      text: r.question ?? "",
+      index: idx,
+    }));
+    const as: Tile[] = take.map((r, idx) => ({
+      key: `A-${idx}`,
+      id: String(r.id),
+      side: "A",
+      text: r.answer ?? "",
+      index: idx,
+    }));
 
-  // Fetch cards once
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const res = await fetch(`${API_BASE}/api/cards`, { cache: "no-store" });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`API error ${res.status}: ${text.slice(0, 200)}`);
-        }
-
-        const data = (await res.json()) as { cards: Card[]; count: number };
-        if (!cancelled) setAllCards(data.cards || []);
-      } catch (e: any) {
-        if (!cancelled) setError(e?.message || "Failed to load cards");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
+    return {
+      qTiles: shuffle(qs),
+      aTiles: shuffle(as),
     };
+  }, [rows]);
+
+  const gameReady = rows.length >= 15;
+
+  function clearMismatchTimer() {
+    if (mismatchIntervalRef.current) {
+      window.clearInterval(mismatchIntervalRef.current);
+      mismatchIntervalRef.current = null;
+    }
+    mismatchStartRef.current = null;
+    setMismatchRemainingMs(null);
+  }
+
+  function startMismatchTimer(ms: number) {
+    clearMismatchTimer();
+    mismatchDurationRef.current = ms;
+    mismatchStartRef.current = Date.now();
+    setMismatchRemainingMs(ms);
+
+    mismatchIntervalRef.current = window.setInterval(() => {
+      // Pause if zoom overlay is open
+      if (zoomed) return;
+
+      const start = mismatchStartRef.current ?? Date.now();
+      const elapsed = Date.now() - start;
+      const remaining = Math.max(0, mismatchDurationRef.current - elapsed);
+      setMismatchRemainingMs(remaining);
+
+      if (remaining <= 0) {
+        clearMismatchTimer();
+        setSelectedQ(null);
+        setSelectedA(null);
+      }
+    }, 100);
+  }
+
+  // If zoom is opened during mismatch, pause. When zoom closes, resume with remaining.
+  useEffect(() => {
+    // If zoom opened, just stop ticking time (interval still runs but early returns).
+    // When zoom closes, we "resume" by resetting the start time based on remaining.
+    if (!zoomed && mismatchRemainingMs !== null && mismatchRemainingMs > 0) {
+      // resume: set new start time so remaining continues accurately
+      mismatchStartRef.current = Date.now();
+      mismatchDurationRef.current = mismatchRemainingMs;
+    }
+  }, [zoomed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function fetchCards() {
+    setLoading(true);
+    setFetchErr(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/cards`, { cache: "no-store" });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Fetch failed (${res.status}): ${text}`);
+      }
+      const data = await res.json();
+      const cards: CardRow[] = data.cards ?? [];
+      setRows(cards);
+    } catch (e: any) {
+      setFetchErr(e?.message ?? "Failed to fetch");
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Load cards on first render
+  useEffect(() => {
+    fetchCards();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const canStart = useMemo(() => {
-    const t1 = teams[0]?.name?.trim();
-    const t2 = teams[1]?.name?.trim();
-    return Boolean(t1 && t2);
-  }, [teams]);
-
   function startGame() {
-    const usable = allCards.filter(
-      (c) => c?.id && c?.question != null && c?.answer != null
-    );
+    const t1 = {
+      name: setupTeam1Name.trim() || "Team 1",
+      color: clampHexColor(setupTeam1Color),
+      score: 0,
+    };
+    const t2 = {
+      name: setupTeam2Name.trim() || "Team 2",
+      color: clampHexColor(setupTeam2Color),
+      score: 0,
+    };
 
-    if (usable.length < 15) {
-      setError(
-        `Not enough rows in the sheet. Need at least 15, found ${usable.length}.`
-      );
+    setTeams([t1, t2]);
+    setActiveTeam(setupFirst);
+    setMatchedKeys(new Map());
+    setSelectedQ(null);
+    setSelectedA(null);
+    setZoomed(null);
+    clearMismatchTimer();
+    setIsGameStarted(true);
+  }
+
+  function resetGame() {
+    setIsGameStarted(false);
+    setSelectedQ(null);
+    setSelectedA(null);
+    setZoomed(null);
+    clearMismatchTimer();
+    setMatchedKeys(new Map());
+    setTeams((prev) => prev.map((t) => ({ ...t, score: 0 })));
+    setActiveTeam(0);
+  }
+
+  function isTileMatched(tile: Tile) {
+    return matchedKeys.has(tile.key);
+  }
+
+  function isTileFaceUp(tile: Tile) {
+    if (isTileMatched(tile)) return true;
+    if (tile.side === "Q" && selectedQ?.key === tile.key) return true;
+    if (tile.side === "A" && selectedA?.key === tile.key) return true;
+    return false;
+  }
+
+  function tileOwnerTeam(tile: Tile): number | null {
+    const v = matchedKeys.get(tile.key);
+    return typeof v === "number" ? v : null;
+  }
+
+  function onTileClick(tile: Tile) {
+    if (!isGameStarted) return;
+
+    // If tile is already matched: allow zoom on second click (or first click if you want)
+    if (isTileMatched(tile)) {
+      if (zoomed?.key === tile.key) setZoomed(null);
+      else setZoomed(tile);
       return;
     }
 
-    const selected = shuffle(usable).slice(0, 15);
-    setQuestionOrder(shuffle(selected));
-    setAnswerOrder(shuffle(selected));
-
-    // Reset match/reveal/score/turn
-    setMatchedById({});
-    setRevealedQuestionId(null);
-    setRevealedAnswerId(null);
-    setBusy(false);
-
-    setTeams((prev) => prev.map((t) => ({ ...t, score: 0 })));
-    setCurrentTeamIndex(startingTeamIndex);
-
-    setStarted(true);
-  }
-
-  function resetToSetup() {
-    setStarted(false);
-    setQuestionOrder([]);
-    setAnswerOrder([]);
-    setMatchedById({});
-    setRevealedQuestionId(null);
-    setRevealedAnswerId(null);
-    setBusy(false);
-    setTeams((prev) => prev.map((t) => ({ ...t, score: 0 })));
-    setCurrentTeamIndex(startingTeamIndex);
-  }
-
-  function newRoundSameTeams() {
-    setTeams((prev) => prev.map((t) => ({ ...t, score: 0 })));
-    setCurrentTeamIndex(startingTeamIndex);
-    setMatchedById({});
-    setRevealedQuestionId(null);
-    setRevealedAnswerId(null);
-    setBusy(false);
-
-    const usable = allCards.filter(
-      (c) => c?.id && c?.question != null && c?.answer != null
-    );
-    if (usable.length < 15) {
-      setError(
-        `Not enough rows in the sheet. Need at least 15, found ${usable.length}.`
-      );
+    // If mismatch countdown is running and both are selected, ignore new picks;
+    // but allow zooming the currently selected card(s)
+    const mismatchActive =
+      mismatchRemainingMs !== null && mismatchRemainingMs > 0;
+    if (mismatchActive) {
+      const isCurrentlySelected =
+        (tile.side === "Q" && selectedQ?.key === tile.key) ||
+        (tile.side === "A" && selectedA?.key === tile.key);
+      if (isCurrentlySelected) {
+        if (zoomed?.key === tile.key) setZoomed(null);
+        else setZoomed(tile);
+      }
       return;
     }
 
-    const selected = shuffle(usable).slice(0, 15);
-    setQuestionOrder(shuffle(selected));
-    setAnswerOrder(shuffle(selected));
+    // If you click the same face-up tile again -> zoom
+    const isSelectedAlready =
+      (tile.side === "Q" && selectedQ?.key === tile.key) ||
+      (tile.side === "A" && selectedA?.key === tile.key);
+
+    if (isSelectedAlready) {
+      if (zoomed?.key === tile.key) setZoomed(null);
+      else setZoomed(tile);
+      return;
+    }
+
+    // Normal selection rules: one Q and one A at a time
+    if (tile.side === "Q") {
+      if (selectedQ) return; // already have a question selected
+      setSelectedQ(tile);
+    } else {
+      if (selectedA) return; // already have an answer selected
+      setSelectedA(tile);
+    }
   }
 
-  function handleQuestionClick(card: Card) {
-    if (!started || busy) return;
-    if (matchedById[card.id] !== undefined) return;
-    if (revealedQuestionId === card.id) return;
-    setRevealedQuestionId(card.id);
-  }
-
-  function handleAnswerClick(card: Card) {
-    if (!started || busy) return;
-    if (matchedById[card.id] !== undefined) return;
-    if (revealedAnswerId === card.id) return;
-    setRevealedAnswerId(card.id);
-  }
-
-  // When both are revealed, evaluate match
+  // When both selected -> check match
   useEffect(() => {
-    if (!started) return;
-    if (!revealedQuestionId || !revealedAnswerId) return;
+    if (!isGameStarted) return;
+    if (!selectedQ || !selectedA) return;
 
-    const qId = revealedQuestionId;
-    const aId = revealedAnswerId;
-    const isMatch = qId === aId;
+    if (selectedQ.id === selectedA.id) {
+      // MATCH: mark both tiles owned by active team
+      setMatchedKeys((prev) => {
+        const next = new Map(prev);
+        next.set(selectedQ.key, activeTeam);
+        next.set(selectedA.key, activeTeam);
+        return next;
+      });
 
-    if (isMatch) {
-      setMatchedById((prev) => ({ ...prev, [qId]: currentTeamIndex }));
-      setTeams((prev) =>
-        prev.map((t, idx) =>
-          idx === currentTeamIndex ? { ...t, score: t.score + 1 } : t
-        )
-      );
-      setRevealedQuestionId(null);
-      setRevealedAnswerId(null);
-      return;
+      setTeams((prev) => {
+        const next = [...prev];
+        next[activeTeam] = { ...next[activeTeam], score: next[activeTeam].score + 1 };
+        return next;
+      });
+
+      // same team goes again
+      window.setTimeout(() => {
+        setSelectedQ(null);
+        setSelectedA(null);
+        setZoomed(null);
+      }, 450);
+    } else {
+      // NO MATCH: keep face-up for 5 seconds, then flip back (unless zoom pauses)
+      startMismatchTimer(5000);
+
+      // switch turn AFTER they flip back (so scoreboard feels fair)
+      // But if you want immediate switch, move this above startMismatchTimer.
+      window.setTimeout(() => {
+        // If mismatch got cleared early for some reason, don't switch.
+        setActiveTeam((t) => (t === 0 ? 1 : 0));
+      }, 0);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedQ, selectedA]);
 
-    // Not a match: keep them open for 5 seconds, then flip back + switch turn
-    setBusy(true);
-    const timer = setTimeout(() => {
-      setRevealedQuestionId(null);
-      setRevealedAnswerId(null);
-      setCurrentTeamIndex((prev) => (prev === 0 ? 1 : 0));
-      setBusy(false);
-    }, 5000);
+  const activeTeamObj = teams[activeTeam];
+  const activeBarBg = lighten(activeTeamObj.color, 0.88);
 
-    return () => clearTimeout(timer);
-  }, [revealedQuestionId, revealedAnswerId, started, currentTeamIndex]);
+  function CardTile({ tile }: { tile: Tile }) {
+    const faceUp = isTileFaceUp(tile);
+    const owner = tileOwnerTeam(tile);
+    const ownerColor = owner !== null ? teams[owner].color : null;
 
-  const totalMatches = Object.keys(matchedById).length;
-  const gameComplete = started && totalMatches === 15;
+    const borderColor = ownerColor ?? "#e5e7eb";
+    const backBg = "#f8fafc"; // subtle
+    const frontBg = ownerColor ? lighten(ownerColor, 0.9) : "white";
 
-  const currentTeam = teams[currentTeamIndex];
+    return (
+      <button
+        type="button"
+        onClick={() => onTileClick(tile)}
+        className="relative w-full h-20 sm:h-24 rounded-xl focus:outline-none"
+        aria-label={`${tile.side === "Q" ? "Question" : "Answer"} card`}
+      >
+        <div
+          className={[
+            "relative w-full h-full rounded-xl transition-transform duration-500 [transform-style:preserve-3d]",
+            faceUp ? "[transform:rotateY(180deg)]" : "",
+          ].join(" ")}
+        >
+          {/* BACK (face down) */}
+          <div
+            className="absolute inset-0 rounded-xl border shadow-sm [backface-visibility:hidden]"
+            style={{ backgroundColor: backBg, borderColor }}
+          >
+            {/* intentionally blank */}
+          </div>
 
-  function cardStyle(teamColor: string | null, isRevealed: boolean) {
-    return {
-      borderColor: teamColor ? teamColor : isRevealed ? "#9ca3af" : "#d1d5db",
-      backgroundColor: teamColor
-        ? hexToRgba(teamColor, 0.18)
-        : isRevealed
-        ? "rgba(0,0,0,0.03)"
-        : "rgba(0,0,0,0.02)",
-    } as React.CSSProperties;
+          {/* FRONT (face up) */}
+          <div
+            className="absolute inset-0 rounded-xl border shadow-sm p-2 text-left [backface-visibility:hidden] [transform:rotateY(180deg)]"
+            style={{ backgroundColor: frontBg, borderColor }}
+          >
+            <div className="h-full w-full overflow-hidden">
+              <div className="text-xs sm:text-sm font-medium leading-snug whitespace-pre-wrap">
+                {tile.text}
+              </div>
+            </div>
+          </div>
+        </div>
+      </button>
+    );
   }
 
   return (
-    <main className="min-h-screen bg-white">
-      <div className="mx-auto max-w-6xl px-6 py-8">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-4xl font-bold tracking-tight">Memory Game</h1>
-          <p className="text-sm text-gray-600">
-            Questions are on the left. Answers are on the right. They are not
-            intermixed.
+    <div className="max-w-6xl mx-auto px-6 py-10">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-6 mb-6">
+        <div>
+          <h1 className="text-4xl font-semibold tracking-tight">Memory Game</h1>
+          <p className="text-gray-600 mt-2">
+            Questions are on the left. Answers are on the right. They are not intermixed.
           </p>
         </div>
 
-        {loading && (
-          <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
-            Loading cards…
-          </div>
-        )}
-
-        {error && (
-          <div className="mt-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-            {error}
-            <div className="mt-1 text-xs text-gray-600">API_BASE: {API_BASE}</div>
-          </div>
-        )}
-
-        {/* Setup Panel */}
-        {!loading && !started && (
-          <section className="mt-6 rounded-xl border border-gray-200 p-6 shadow-sm">
-            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-              <div>
-                <h2 className="text-xl font-semibold">Game Setup</h2>
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  className="rounded-md border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
-                  onClick={() => {
-                    setTeams([
-                      { name: "Team 1", color: "#22c55e", score: 0 },
-                      { name: "Team 2", color: "#a855f7", score: 0 },
-                    ]);
-                    setStartingTeamIndex(0);
-                  }}
-                >
-                  Reset Defaults
-                </button>
-
-                <button
-                  className="rounded-md bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={!canStart || allCards.length < 15}
-                  onClick={startGame}
-                >
-                  Start Game
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-3">
-              {/* Team 1 */}
-              <div className="rounded-lg border border-gray-200 p-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">Team 1</h3>
-                  <span
-                    className="inline-block h-3 w-3 rounded-full"
-                    style={{ backgroundColor: teams[0].color }}
-                  />
-                </div>
-
-                <label className="mt-3 block text-xs font-medium text-gray-700">
-                  Name
-                </label>
-                <input
-                  className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  value={teams[0].name}
-                  onChange={(e) =>
-                    setTeams((prev) => [
-                      { ...prev[0], name: e.target.value },
-                      prev[1],
-                    ])
-                  }
-                />
-
-                <label className="mt-3 block text-xs font-medium text-gray-700">
-                  Color
-                </label>
-                <input
-                  type="color"
-                  className="mt-1 h-10 w-full cursor-pointer rounded-md border border-gray-300 p-1"
-                  value={teams[0].color}
-                  onChange={(e) =>
-                    setTeams((prev) => [
-                      { ...prev[0], color: e.target.value },
-                      prev[1],
-                    ])
-                  }
-                />
-              </div>
-
-              {/* Team 2 */}
-              <div className="rounded-lg border border-gray-200 p-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">Team 2</h3>
-                  <span
-                    className="inline-block h-3 w-3 rounded-full"
-                    style={{ backgroundColor: teams[1].color }}
-                  />
-                </div>
-
-                <label className="mt-3 block text-xs font-medium text-gray-700">
-                  Name
-                </label>
-                <input
-                  className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  value={teams[1].name}
-                  onChange={(e) =>
-                    setTeams((prev) => [
-                      prev[0],
-                      { ...prev[1], name: e.target.value },
-                    ])
-                  }
-                />
-
-                <label className="mt-3 block text-xs font-medium text-gray-700">
-                  Color
-                </label>
-                <input
-                  type="color"
-                  className="mt-1 h-10 w-full cursor-pointer rounded-md border border-gray-300 p-1"
-                  value={teams[1].color}
-                  onChange={(e) =>
-                    setTeams((prev) => [
-                      prev[0],
-                      { ...prev[1], color: e.target.value },
-                    ])
-                  }
-                />
-              </div>
-
-              {/* Starting team */}
-              <div className="rounded-lg border border-gray-200 p-4">
-                <h3 className="text-sm font-semibold">Who goes first?</h3>
-
-                <div className="mt-3 space-y-2">
-                  <label className="flex cursor-pointer items-center gap-2 text-sm">
-                    <input
-                      type="radio"
-                      name="firstTeam"
-                      checked={startingTeamIndex === 0}
-                      onChange={() => setStartingTeamIndex(0)}
-                    />
-                    <span className="flex items-center gap-2">
-                      <span
-                        className="inline-block h-3 w-3 rounded-full"
-                        style={{ backgroundColor: teams[0].color }}
-                      />
-                      {teams[0].name || "Team 1"}
-                    </span>
-                  </label>
-
-                  <label className="flex cursor-pointer items-center gap-2 text-sm">
-                    <input
-                      type="radio"
-                      name="firstTeam"
-                      checked={startingTeamIndex === 1}
-                      onChange={() => setStartingTeamIndex(1)}
-                    />
-                    <span className="flex items-center gap-2">
-                      <span
-                        className="inline-block h-3 w-3 rounded-full"
-                        style={{ backgroundColor: teams[1].color }}
-                      />
-                      {teams[1].name || "Team 2"}
-                    </span>
-                  </label>
-                </div>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {/* Game UI */}
-        {!loading && started && (
-          <>
-            {/* Scoreboard */}
-            <section className="mt-6 rounded-xl border border-gray-200 p-5 shadow-sm">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div className="flex flex-col gap-1">
-                  <div className="text-sm text-gray-600">Current turn</div>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="inline-block h-3 w-3 rounded-full"
-                      style={{ backgroundColor: currentTeam.color }}
-                    />
-                    <span className="text-lg font-semibold">
-                      {currentTeam.name}
-                    </span>
-                    {busy && (
-                      <span className="text-xs text-gray-500">(waiting…)</span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-2 md:flex-row md:items-center">
-                  <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="inline-block h-3 w-3 rounded-full"
-                        style={{ backgroundColor: teams[0].color }}
-                      />
-                      <span className="text-sm font-medium">
-                        {teams[0].name}:{" "}
-                        <span className="font-bold">{teams[0].score}</span>
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="inline-block h-3 w-3 rounded-full"
-                        style={{ backgroundColor: teams[1].color }}
-                      />
-                      <span className="text-sm font-medium">
-                        {teams[1].name}:{" "}
-                        <span className="font-bold">{teams[1].score}</span>
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="flex gap-2 md:pl-4">
-                    <button
-                      className="rounded-md border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
-                      onClick={newRoundSameTeams}
-                    >
-                      New Round
-                    </button>
-
-                    <button
-                      className="rounded-md border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
-                      onClick={resetToSetup}
-                    >
-                      Change Teams
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-3 text-xs text-gray-500">
-                Matches found: {totalMatches} / 15
-              </div>
-
-              {gameComplete && (
-                <div className="mt-3 rounded-md border border-gray-200 bg-gray-50 p-3 text-sm">
-                  <span className="font-semibold">Round complete!</span>
-                </div>
-              )}
-            </section>
-
-            {/* Board (3x5 per side) */}
-            <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
-              {/* Questions */}
-              <section className="rounded-xl border border-gray-200 p-6 shadow-sm">
-                <h2 className="text-lg font-semibold">Questions</h2>
-
-                <div className="mt-4 grid grid-cols-3 gap-3">
-                  {questionOrder.map((c) => {
-                    const matchedTeamIndex = matchedById[c.id];
-                    const isMatched = matchedTeamIndex !== undefined;
-                    const isRevealed = revealedQuestionId === c.id || isMatched;
-
-                    const teamColor = isMatched
-                      ? teams[matchedTeamIndex].color
-                      : null;
-
-                    // When revealed (but not matched), expand to full row to fit text.
-                    const expand =
-                      revealedQuestionId === c.id && matchedById[c.id] === undefined;
-
-                    return (
-                      <button
-                        key={`q-${c.id}`}
-                        onClick={() => handleQuestionClick(c)}
-                        disabled={busy || isMatched}
-                        className={[
-                          "rounded-md border text-left text-sm transition disabled:cursor-not-allowed",
-                          "h-20 px-3 py-2", // default compact size
-                          "hover:shadow-sm",
-                          expand ? "col-span-3 h-auto p-4 shadow-md z-10" : "",
-                        ].join(" ")}
-                        style={cardStyle(teamColor, isRevealed)}
-                        aria-label={isRevealed ? `Question: ${c.question}` : "Face down"}
-                        title={
-                          isMatched
-                            ? `Matched by ${teams[matchedTeamIndex].name}`
-                            : undefined
-                        }
-                      >
-                        {isRevealed ? (
-                          <div className="text-gray-900 whitespace-pre-wrap break-words">
-                            {c.question}
-                          </div>
-                        ) : (
-                          // Face down = blank
-                          <div className="h-full w-full" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-
-              {/* Answers */}
-              <section className="rounded-xl border border-gray-200 p-6 shadow-sm">
-                <h2 className="text-lg font-semibold">Answers</h2>
-
-                <div className="mt-4 grid grid-cols-3 gap-3">
-                  {answerOrder.map((c) => {
-                    const matchedTeamIndex = matchedById[c.id];
-                    const isMatched = matchedTeamIndex !== undefined;
-                    const isRevealed = revealedAnswerId === c.id || isMatched;
-
-                    const teamColor = isMatched
-                      ? teams[matchedTeamIndex].color
-                      : null;
-
-                    const expand =
-                      revealedAnswerId === c.id && matchedById[c.id] === undefined;
-
-                    return (
-                      <button
-                        key={`a-${c.id}`}
-                        onClick={() => handleAnswerClick(c)}
-                        disabled={busy || isMatched}
-                        className={[
-                          "rounded-md border text-left text-sm transition disabled:cursor-not-allowed",
-                          "h-20 px-3 py-2",
-                          "hover:shadow-sm",
-                          expand ? "col-span-3 h-auto p-4 shadow-md z-10" : "",
-                        ].join(" ")}
-                        style={cardStyle(teamColor, isRevealed)}
-                        aria-label={isRevealed ? `Answer: ${c.answer}` : "Face down"}
-                        title={
-                          isMatched
-                            ? `Matched by ${teams[matchedTeamIndex].name}`
-                            : undefined
-                        }
-                      >
-                        {isRevealed ? (
-                          <div className="text-gray-900 whitespace-pre-wrap break-words">
-                            {c.answer}
-                          </div>
-                        ) : (
-                          <div className="h-full w-full" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-            </div>
-
-            <div className="mt-4 text-xs text-gray-400">API_BASE: {API_BASE}</div>
-          </>
+        {isGameStarted && (
+          <button
+            type="button"
+            onClick={resetGame}
+            className="px-4 py-2 rounded-lg border border-gray-300 text-sm hover:bg-gray-50"
+          >
+            Reset
+          </button>
         )}
       </div>
-    </main>
+
+      {/* Setup Panel */}
+      {!isGameStarted && (
+        <div className="border rounded-2xl p-5 mb-8 bg-white shadow-sm">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Team 1 Name</label>
+              <input
+                value={setupTeam1Name}
+                onChange={(e) => setSetupTeam1Name(e.target.value)}
+                className="w-full border rounded-lg px-3 py-2"
+                placeholder="Team 1"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Team 1 Color</label>
+              <input
+                type="color"
+                value={setupTeam1Color}
+                onChange={(e) => setSetupTeam1Color(e.target.value)}
+                className="w-full h-10 border rounded-lg px-2 py-1"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Who goes first?</label>
+              <select
+                value={String(setupFirst)}
+                onChange={(e) => setSetupFirst(e.target.value === "0" ? 0 : 1)}
+                className="w-full border rounded-lg px-3 py-2"
+              >
+                <option value="0">Team 1</option>
+                <option value="1">Team 2</option>
+              </select>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Team 2 Name</label>
+              <input
+                value={setupTeam2Name}
+                onChange={(e) => setSetupTeam2Name(e.target.value)}
+                className="w-full border rounded-lg px-3 py-2"
+                placeholder="Team 2"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Team 2 Color</label>
+              <input
+                type="color"
+                value={setupTeam2Color}
+                onChange={(e) => setSetupTeam2Color(e.target.value)}
+                className="w-full h-10 border rounded-lg px-2 py-1"
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={fetchCards}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-sm hover:bg-gray-50"
+              >
+                Refresh Cards
+              </button>
+
+              <button
+                type="button"
+                onClick={startGame}
+                disabled={!gameReady || loading}
+                className="px-4 py-2 rounded-lg text-sm text-white disabled:opacity-50"
+                style={{ backgroundColor: "#111827" }}
+              >
+                Start Game
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 text-sm text-gray-600">
+            <div>
+              <span className="font-mono text-xs">API_BASE:</span>{" "}
+              <span className="font-mono text-xs">{API_BASE}</span>
+            </div>
+            {loading && <div className="mt-1">Loading cards…</div>}
+            {fetchErr && (
+              <div className="mt-1 text-red-600">
+                Failed to fetch ({fetchErr})
+              </div>
+            )}
+            {!loading && !fetchErr && rows.length > 0 && (
+              <div className="mt-1">Loaded {rows.length} rows.</div>
+            )}
+            {!loading && !fetchErr && rows.length > 0 && rows.length < 15 && (
+              <div className="mt-1 text-red-600">
+                Need at least 15 rows in Google Sheets. Currently: {rows.length}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Scoreboard */}
+      {isGameStarted && (
+        <div
+          className="rounded-2xl border p-4 mb-8"
+          style={{ backgroundColor: activeBarBg, borderColor: "#e5e7eb" }}
+        >
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div
+                className="w-3 h-3 rounded-full"
+                style={{ backgroundColor: activeTeamObj.color }}
+              />
+              <div className="text-sm text-gray-700">
+                Turn:{" "}
+                <span className="font-semibold">{activeTeamObj.name}</span>
+              </div>
+
+              {mismatchRemainingMs !== null && mismatchRemainingMs > 0 && (
+                <div className="text-xs text-gray-600">
+                  Flipping back in{" "}
+                  <span className="font-mono">
+                    {Math.ceil(mismatchRemainingMs / 1000)}s
+                  </span>
+                  {zoomed ? " (paused)" : ""}
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-4">
+              {teams.map((t, idx) => (
+                <div
+                  key={idx}
+                  className="rounded-xl border px-4 py-2 bg-white shadow-sm"
+                  style={{ borderColor: lighten(t.color, 0.5) }}
+                >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="w-2.5 h-2.5 rounded-full"
+                      style={{ backgroundColor: t.color }}
+                    />
+                    <div className="text-sm font-semibold">{t.name}</div>
+                  </div>
+                  <div className="text-xs text-gray-600 mt-1">
+                    Points: <span className="font-mono">{t.score}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Boards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        {/* Questions */}
+        <div className="border rounded-2xl p-5 bg-white shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">Questions</h2>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            {qTiles.map((t) => (
+              <CardTile key={t.key} tile={t} />
+            ))}
+          </div>
+        </div>
+
+        {/* Answers */}
+        <div className="border rounded-2xl p-5 bg-white shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">Answers</h2>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            {aTiles.map((t) => (
+              <CardTile key={t.key} tile={t} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Zoom Overlay */}
+      {zoomed && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-6"
+          onClick={() => setZoomed(null)}
+        >
+          <div
+            className="w-full max-w-3xl rounded-2xl bg-white shadow-xl border p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-xs text-gray-500">
+                  {zoomed.side === "Q" ? "Question" : "Answer"}
+                </div>
+                <div className="text-2xl font-semibold mt-1">Card</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setZoomed(null)}
+                className="px-3 py-2 rounded-lg border border-gray-300 text-sm hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 whitespace-pre-wrap text-lg leading-relaxed">
+              {zoomed.text}
+            </div>
+
+            <div className="mt-5 text-xs text-gray-500">
+              Tip: click the same flipped card again to open/close this view.
+              {mismatchRemainingMs !== null && mismatchRemainingMs > 0
+                ? " (Mismatch timer is paused while this is open.)"
+                : ""}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
