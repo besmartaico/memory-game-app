@@ -27,7 +27,6 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 function hexToRgba(hex: string, alpha: number): string {
-  // Supports #RGB or #RRGGBB
   const h = hex.replace("#", "").trim();
   const full =
     h.length === 3
@@ -52,13 +51,12 @@ export default function MemoryGame() {
   // Game setup
   const [started, setStarted] = useState(false);
   const [teams, setTeams] = useState<Team[]>([
-    { name: "Team 1", color: "#22c55e", score: 0 }, // green
-    { name: "Team 2", color: "#a855f7", score: 0 }, // purple
+    { name: "Team 1", color: "#22c55e", score: 0 },
+    { name: "Team 2", color: "#a855f7", score: 0 },
   ]);
   const [startingTeamIndex, setStartingTeamIndex] = useState(0);
 
   // Round state (15 pairs)
-  const [roundCards, setRoundCards] = useState<Card[]>([]);
   const [questionOrder, setQuestionOrder] = useState<Card[]>([]);
   const [answerOrder, setAnswerOrder] = useState<Card[]>([]);
 
@@ -111,7 +109,6 @@ export default function MemoryGame() {
   }, [teams]);
 
   function startGame() {
-    // Choose 15 cards (pairs) from allCards
     const usable = allCards.filter(
       (c) => c?.id && c?.question != null && c?.answer != null
     );
@@ -124,8 +121,6 @@ export default function MemoryGame() {
     }
 
     const selected = shuffle(usable).slice(0, 15);
-
-    setRoundCards(selected);
     setQuestionOrder(shuffle(selected));
     setAnswerOrder(shuffle(selected));
 
@@ -143,7 +138,6 @@ export default function MemoryGame() {
 
   function resetToSetup() {
     setStarted(false);
-    setRoundCards([]);
     setQuestionOrder([]);
     setAnswerOrder([]);
     setMatchedById({});
@@ -155,7 +149,6 @@ export default function MemoryGame() {
   }
 
   function newRoundSameTeams() {
-    // Keep teams + colors, reset scores and re-pick 15
     setTeams((prev) => prev.map((t) => ({ ...t, score: 0 })));
     setCurrentTeamIndex(startingTeamIndex);
     setMatchedById({});
@@ -174,29 +167,21 @@ export default function MemoryGame() {
     }
 
     const selected = shuffle(usable).slice(0, 15);
-    setRoundCards(selected);
     setQuestionOrder(shuffle(selected));
     setAnswerOrder(shuffle(selected));
   }
 
-  const totalMatches = Object.keys(matchedById).length;
-  const gameComplete = started && totalMatches === 15;
-
   function handleQuestionClick(card: Card) {
     if (!started || busy) return;
-    if (matchedById[card.id] !== undefined) return; // already matched
-
-    // If this exact card is already revealed, ignore
+    if (matchedById[card.id] !== undefined) return;
     if (revealedQuestionId === card.id) return;
-
     setRevealedQuestionId(card.id);
   }
 
   function handleAnswerClick(card: Card) {
     if (!started || busy) return;
-    if (matchedById[card.id] !== undefined) return; // already matched
+    if (matchedById[card.id] !== undefined) return;
     if (revealedAnswerId === card.id) return;
-
     setRevealedAnswerId(card.id);
   }
 
@@ -207,37 +192,47 @@ export default function MemoryGame() {
 
     const qId = revealedQuestionId;
     const aId = revealedAnswerId;
-
     const isMatch = qId === aId;
 
     if (isMatch) {
-      // Mark matched by current team, add point, keep turn
       setMatchedById((prev) => ({ ...prev, [qId]: currentTeamIndex }));
       setTeams((prev) =>
         prev.map((t, idx) =>
           idx === currentTeamIndex ? { ...t, score: t.score + 1 } : t
         )
       );
-
-      // Leave them revealed? We’ll clear selection but matched cards stay face-up via matchedById.
       setRevealedQuestionId(null);
       setRevealedAnswerId(null);
       return;
     }
 
-    // Not a match: flip back after short delay + switch turn
+    // Not a match: keep them open for 5 seconds, then flip back + switch turn
     setBusy(true);
     const timer = setTimeout(() => {
       setRevealedQuestionId(null);
       setRevealedAnswerId(null);
       setCurrentTeamIndex((prev) => (prev === 0 ? 1 : 0));
       setBusy(false);
-    }, 900);
+    }, 5000);
 
     return () => clearTimeout(timer);
   }, [revealedQuestionId, revealedAnswerId, started, currentTeamIndex]);
 
+  const totalMatches = Object.keys(matchedById).length;
+  const gameComplete = started && totalMatches === 15;
+
   const currentTeam = teams[currentTeamIndex];
+
+  function cardStyle(teamColor: string | null, isRevealed: boolean) {
+    return {
+      borderColor: teamColor ? teamColor : isRevealed ? "#9ca3af" : "#d1d5db",
+      backgroundColor: teamColor
+        ? hexToRgba(teamColor, 0.18)
+        : isRevealed
+        ? "rgba(0,0,0,0.03)"
+        : "rgba(0,0,0,0.02)",
+    } as React.CSSProperties;
+  }
 
   return (
     <main className="min-h-screen bg-white">
@@ -250,7 +245,6 @@ export default function MemoryGame() {
           </p>
         </div>
 
-        {/* Loading / errors */}
         {loading && (
           <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
             Loading cards…
@@ -270,13 +264,6 @@ export default function MemoryGame() {
             <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
               <div>
                 <h2 className="text-xl font-semibold">Game Setup</h2>
-                <p className="mt-1 text-sm text-gray-600">
-                  Enter team names, pick colors, and choose who goes first.
-                </p>
-                <p className="mt-1 text-xs text-gray-500">
-                  Needs at least <span className="font-semibold">15</span> rows
-                  in Google Sheets.
-                </p>
               </div>
 
               <div className="flex gap-2">
@@ -297,11 +284,6 @@ export default function MemoryGame() {
                   className="rounded-md bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                   disabled={!canStart || allCards.length < 15}
                   onClick={startGame}
-                  title={
-                    allCards.length < 15
-                      ? "Need at least 15 cards from the API"
-                      : undefined
-                  }
                 >
                   Start Game
                 </button>
@@ -331,7 +313,6 @@ export default function MemoryGame() {
                       prev[1],
                     ])
                   }
-                  placeholder="e.g., Green Team"
                 />
 
                 <label className="mt-3 block text-xs font-medium text-gray-700">
@@ -372,7 +353,6 @@ export default function MemoryGame() {
                       { ...prev[1], name: e.target.value },
                     ])
                   }
-                  placeholder="e.g., Purple Team"
                 />
 
                 <label className="mt-3 block text-xs font-medium text-gray-700">
@@ -394,9 +374,6 @@ export default function MemoryGame() {
               {/* Starting team */}
               <div className="rounded-lg border border-gray-200 p-4">
                 <h3 className="text-sm font-semibold">Who goes first?</h3>
-                <p className="mt-1 text-xs text-gray-500">
-                  Winner of a match keeps the turn.
-                </p>
 
                 <div className="mt-3 space-y-2">
                   <label className="flex cursor-pointer items-center gap-2 text-sm">
@@ -453,9 +430,7 @@ export default function MemoryGame() {
                       {currentTeam.name}
                     </span>
                     {busy && (
-                      <span className="text-xs text-gray-500">
-                        (checking…)
-                      </span>
+                      <span className="text-xs text-gray-500">(waiting…)</span>
                     )}
                   </div>
                 </div>
@@ -509,19 +484,18 @@ export default function MemoryGame() {
 
               {gameComplete && (
                 <div className="mt-3 rounded-md border border-gray-200 bg-gray-50 p-3 text-sm">
-                  <span className="font-semibold">Round complete!</span>{" "}
-                  Start a new round or change teams.
+                  <span className="font-semibold">Round complete!</span>
                 </div>
               )}
             </section>
 
-            {/* Board */}
+            {/* Board (3x5 per side) */}
             <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
               {/* Questions */}
               <section className="rounded-xl border border-gray-200 p-6 shadow-sm">
                 <h2 className="text-lg font-semibold">Questions</h2>
 
-                <div className="mt-4 grid grid-cols-1 gap-3">
+                <div className="mt-4 grid grid-cols-3 gap-3">
                   {questionOrder.map((c) => {
                     const matchedTeamIndex = matchedById[c.id];
                     const isMatched = matchedTeamIndex !== undefined;
@@ -531,27 +505,23 @@ export default function MemoryGame() {
                       ? teams[matchedTeamIndex].color
                       : null;
 
+                    // When revealed (but not matched), expand to full row to fit text.
+                    const expand =
+                      revealedQuestionId === c.id && matchedById[c.id] === undefined;
+
                     return (
                       <button
                         key={`q-${c.id}`}
                         onClick={() => handleQuestionClick(c)}
                         disabled={busy || isMatched}
-                        className="w-full rounded-md border px-4 py-3 text-left text-sm transition hover:shadow-sm disabled:cursor-not-allowed"
-                        style={{
-                          borderColor: teamColor
-                            ? teamColor
-                            : isRevealed
-                            ? "#9ca3af"
-                            : "#d1d5db",
-                          backgroundColor: teamColor
-                            ? hexToRgba(teamColor, 0.18)
-                            : isRevealed
-                            ? "rgba(0,0,0,0.03)"
-                            : "rgba(0,0,0,0.02)",
-                        }}
-                        aria-label={
-                          isRevealed ? `Question: ${c.question}` : "Face down"
-                        }
+                        className={[
+                          "rounded-md border text-left text-sm transition disabled:cursor-not-allowed",
+                          "h-20 px-3 py-2", // default compact size
+                          "hover:shadow-sm",
+                          expand ? "col-span-3 h-auto p-4 shadow-md z-10" : "",
+                        ].join(" ")}
+                        style={cardStyle(teamColor, isRevealed)}
+                        aria-label={isRevealed ? `Question: ${c.question}` : "Face down"}
                         title={
                           isMatched
                             ? `Matched by ${teams[matchedTeamIndex].name}`
@@ -559,14 +529,12 @@ export default function MemoryGame() {
                         }
                       >
                         {isRevealed ? (
-                          <div className="text-gray-900">{c.question}</div>
-                        ) : (
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-gray-700">
-                              Face Down
-                            </span>
-                            <span className="text-xs text-gray-500">?</span>
+                          <div className="text-gray-900 whitespace-pre-wrap break-words">
+                            {c.question}
                           </div>
+                        ) : (
+                          // Face down = blank
+                          <div className="h-full w-full" />
                         )}
                       </button>
                     );
@@ -578,7 +546,7 @@ export default function MemoryGame() {
               <section className="rounded-xl border border-gray-200 p-6 shadow-sm">
                 <h2 className="text-lg font-semibold">Answers</h2>
 
-                <div className="mt-4 grid grid-cols-1 gap-3">
+                <div className="mt-4 grid grid-cols-3 gap-3">
                   {answerOrder.map((c) => {
                     const matchedTeamIndex = matchedById[c.id];
                     const isMatched = matchedTeamIndex !== undefined;
@@ -588,27 +556,22 @@ export default function MemoryGame() {
                       ? teams[matchedTeamIndex].color
                       : null;
 
+                    const expand =
+                      revealedAnswerId === c.id && matchedById[c.id] === undefined;
+
                     return (
                       <button
                         key={`a-${c.id}`}
                         onClick={() => handleAnswerClick(c)}
                         disabled={busy || isMatched}
-                        className="w-full rounded-md border px-4 py-3 text-left text-sm transition hover:shadow-sm disabled:cursor-not-allowed"
-                        style={{
-                          borderColor: teamColor
-                            ? teamColor
-                            : isRevealed
-                            ? "#9ca3af"
-                            : "#d1d5db",
-                          backgroundColor: teamColor
-                            ? hexToRgba(teamColor, 0.18)
-                            : isRevealed
-                            ? "rgba(0,0,0,0.03)"
-                            : "rgba(0,0,0,0.02)",
-                        }}
-                        aria-label={
-                          isRevealed ? `Answer: ${c.answer}` : "Face down"
-                        }
+                        className={[
+                          "rounded-md border text-left text-sm transition disabled:cursor-not-allowed",
+                          "h-20 px-3 py-2",
+                          "hover:shadow-sm",
+                          expand ? "col-span-3 h-auto p-4 shadow-md z-10" : "",
+                        ].join(" ")}
+                        style={cardStyle(teamColor, isRevealed)}
+                        aria-label={isRevealed ? `Answer: ${c.answer}` : "Face down"}
                         title={
                           isMatched
                             ? `Matched by ${teams[matchedTeamIndex].name}`
@@ -616,14 +579,11 @@ export default function MemoryGame() {
                         }
                       >
                         {isRevealed ? (
-                          <div className="text-gray-900">{c.answer}</div>
-                        ) : (
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-gray-700">
-                              Face Down
-                            </span>
-                            <span className="text-xs text-gray-500">?</span>
+                          <div className="text-gray-900 whitespace-pre-wrap break-words">
+                            {c.answer}
                           </div>
+                        ) : (
+                          <div className="h-full w-full" />
                         )}
                       </button>
                     );
@@ -632,10 +592,7 @@ export default function MemoryGame() {
               </section>
             </div>
 
-            {/* Tiny debug line (optional) */}
-            <div className="mt-4 text-xs text-gray-400">
-              API_BASE: {API_BASE}
-            </div>
+            <div className="mt-4 text-xs text-gray-400">API_BASE: {API_BASE}</div>
           </>
         )}
       </div>
