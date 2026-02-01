@@ -8,33 +8,13 @@ type Card = {
   answer: string;
 };
 
-type ApiResponse = {
-  count: number;
-  cards: Card[];
-};
-
-function shuffle<T>(arr: T[]): T[] {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000";
 
 export default function MemoryGame() {
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000";
-
   const [cards, setCards] = useState<Card[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>("");
-
-  // selections
-  const [selectedQ, setSelectedQ] = useState<string | null>(null);
-  const [selectedA, setSelectedA] = useState<string | null>(null);
-
-  // matched ids
-  const [matched, setMatched] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,22 +22,20 @@ export default function MemoryGame() {
     async function load() {
       try {
         setLoading(true);
-        setError("");
+        setError(null);
 
-        const res = await fetch(`${apiBase}/api/cards`, { cache: "no-store" });
-        if (!res.ok) throw new Error(`API error: ${res.status}`);
-
-        const data = (await res.json()) as ApiResponse;
-
-        if (!cancelled) {
-          setCards(data.cards || []);
-          setLoading(false);
+        const res = await fetch(`${API_BASE}/api/cards`, { cache: "no-store" });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error ${res.status}: ${text.slice(0, 200)}`);
         }
+
+        const data = (await res.json()) as { cards: Card[]; count: number };
+        if (!cancelled) setCards(data.cards || []);
       } catch (e: any) {
-        if (!cancelled) {
-          setError(e?.message || "Failed to load cards");
-          setLoading(false);
-        }
+        if (!cancelled) setError(e?.message || "Failed to load cards");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -65,93 +43,82 @@ export default function MemoryGame() {
     return () => {
       cancelled = true;
     };
-  }, [apiBase]);
+  }, []);
 
-  const questions = useMemo(() => {
-    return cards.map((c) => ({ id: c.id, text: c.question }));
-  }, [cards]);
-
-  const answers = useMemo(() => {
-    return shuffle(cards.map((c) => ({ id: c.id, text: c.answer })));
-  }, [cards]);
-
-  // check match when both selected
-  useEffect(() => {
-    if (!selectedQ || !selectedA) return;
-
-    if (selectedQ === selectedA) {
-      setMatched((prev) => new Set(prev).add(selectedQ));
-    }
-
-    const t = setTimeout(() => {
-      setSelectedQ(null);
-      setSelectedA(null);
-    }, 650);
-
-    return () => clearTimeout(t);
-  }, [selectedQ, selectedA]);
-
-  if (loading) return <div className="text-gray-600">Loading cards…</div>;
-  if (error) return <div className="text-red-600">Error: {error}</div>;
-  if (!cards.length) return <div className="text-gray-600">No cards found in the sheet.</div>;
+  const questions = useMemo(() => cards.map((c) => c.question), [cards]);
+  const answers = useMemo(() => cards.map((c) => c.answer), [cards]);
 
   return (
-    <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-      {/* Questions */}
-      <div className="rounded-xl border p-4">
-        <h2 className="text-lg font-semibold">Questions</h2>
-        <div className="mt-3 space-y-2">
-          {questions.map((q) => {
-            const isMatched = matched.has(q.id);
-            const isSelected = selectedQ === q.id;
+    <main className="min-h-screen bg-white">
+      <div className="mx-auto max-w-5xl px-6 py-10">
+        <h1 className="text-4xl font-bold tracking-tight">Memory Game</h1>
+        <p className="mt-2 text-sm text-gray-600">
+          Questions are on the left. Answers are on the right. They are not
+          intermixed.
+        </p>
 
-            return (
-              <button
-                key={q.id}
-                type="button"
-                disabled={isMatched}
-                onClick={() => setSelectedQ(q.id)}
-                className={[
-                  "w-full rounded-lg border px-3 py-3 text-left text-sm transition",
-                  isMatched ? "cursor-not-allowed bg-gray-100 text-gray-400" : "hover:bg-gray-50",
-                  isSelected ? "ring-2 ring-black" : "",
-                  selectedQ && !isSelected ? "opacity-80" : "",
-                ].join(" ")}
-              >
-                {q.text || <span className="italic text-gray-400">(empty question)</span>}
-              </button>
-            );
-          })}
+        <div className="mt-8 grid grid-cols-1 gap-6 md:grid-cols-2">
+          <section className="rounded-xl border border-gray-200 p-6 shadow-sm">
+            <h2 className="text-lg font-semibold">Questions</h2>
+
+            <div className="mt-4 space-y-3">
+              {loading && <div className="text-sm text-gray-600">Loading…</div>}
+              {error && (
+                <div className="text-sm text-red-600">
+                  {error}
+                  <div className="mt-1 text-xs text-gray-500">
+                    API_BASE: {API_BASE}
+                  </div>
+                </div>
+              )}
+              {!loading && !error && questions.length === 0 && (
+                <div className="text-sm text-gray-600">No cards found.</div>
+              )}
+
+              {!loading &&
+                !error &&
+                questions.map((q, idx) => (
+                  <div
+                    key={`q-${idx}`}
+                    className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-3 text-sm text-gray-800"
+                  >
+                    {q || <span className="text-gray-400">(blank)</span>}
+                  </div>
+                ))}
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-gray-200 p-6 shadow-sm">
+            <h2 className="text-lg font-semibold">Answers</h2>
+
+            <div className="mt-4 space-y-3">
+              {loading && <div className="text-sm text-gray-600">Loading…</div>}
+              {error && (
+                <div className="text-sm text-red-600">
+                  {error}
+                  <div className="mt-1 text-xs text-gray-500">
+                    API_BASE: {API_BASE}
+                  </div>
+                </div>
+              )}
+              {!loading && !error && answers.length === 0 && (
+                <div className="text-sm text-gray-600">No cards found.</div>
+              )}
+
+              {!loading &&
+                !error &&
+                answers.map((a, idx) => (
+                  <div
+                    key={`a-${idx}`}
+                    className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-3 text-sm text-gray-800"
+                  >
+                    {a || <span className="text-gray-400">(blank)</span>}
+                  </div>
+                ))}
+            </div>
+          </section>
         </div>
       </div>
-
-      {/* Answers */}
-      <div className="rounded-xl border p-4">
-        <h2 className="text-lg font-semibold">Answers</h2>
-        <div className="mt-3 space-y-2">
-          {answers.map((a) => {
-            const isMatched = matched.has(a.id);
-            const isSelected = selectedA === a.id;
-
-            return (
-              <button
-                key={a.id}
-                type="button"
-                disabled={isMatched}
-                onClick={() => setSelectedA(a.id)}
-                className={[
-                  "w-full rounded-lg border px-3 py-3 text-left text-sm transition",
-                  isMatched ? "cursor-not-allowed bg-gray-100 text-gray-400" : "hover:bg-gray-50",
-                  isSelected ? "ring-2 ring-black" : "",
-                  selectedA && !isSelected ? "opacity-80" : "",
-                ].join(" ")}
-              >
-                {a.text || <span className="italic text-gray-400">(empty answer)</span>}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </div>
+    </main>
   );
 }
