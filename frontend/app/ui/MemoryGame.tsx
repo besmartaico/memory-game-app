@@ -332,8 +332,8 @@ export default function MemoryGame() {
     const owner = tileOwnerTeam(tile);
     const ownerColor = owner !== null ? teams[owner].color : null;
 
-    const borderColor = ownerColor ?? "#374151";
-    const backBg = "#1e293b"; // subtle
+    const borderColor = ownerColor ?? "rgba(55, 65, 81, 0.5)";
+    const backBg = "rgba(30, 41, 59, 0.5)"; // subtle
     const frontBg = ownerColor ? lighten(ownerColor, 0.9) : "white";
 
     return (
@@ -499,7 +499,7 @@ export default function MemoryGame() {
       {isGameStarted && (
         <div
           className="rounded-2xl border p-4 mb-8"
-          style={{ backgroundColor: activeBarBg, borderColor: "#374151" }}
+          style={{ backgroundColor: activeBarBg, borderColor: "rgba(55, 65, 81, 0.5)" }}
         >
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <div className="flex items-center gap-3">
