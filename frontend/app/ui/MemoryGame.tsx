@@ -332,8 +332,8 @@ export default function MemoryGame() {
     const owner = tileOwnerTeam(tile);
     const ownerColor = owner !== null ? teams[owner].color : null;
 
-    const borderColor = ownerColor ?? "#e5e7eb";
-    const backBg = "#f8fafc"; // subtle
+    const borderColor = ownerColor ?? "#374151";
+    const backBg = "#1e293b"; // subtle
     const frontBg = ownerColor ? lighten(ownerColor, 0.9) : "white";
 
     return (
@@ -352,7 +352,7 @@ export default function MemoryGame() {
           {/* BACK (face down) */}
           <div
             className="absolute inset-0 rounded-xl border shadow-sm [backface-visibility:hidden]"
-            style={{ backgroundColor: backBg, borderColor }}
+            style={{ backgroundColor: backBg, borderColor: "#000000" }}
           >
             {/* intentionally blank */}
           </div>
@@ -360,7 +360,7 @@ export default function MemoryGame() {
           {/* FRONT (face up) */}
           <div
             className="absolute inset-0 rounded-xl border shadow-sm p-2 text-left [backface-visibility:hidden] [transform:rotateY(180deg)]"
-            style={{ backgroundColor: frontBg, borderColor }}
+            style={{ backgroundColor: frontBg, borderColor: "#000000" }}
           >
             <div className="h-full w-full overflow-hidden">
               <div className="text-xs sm:text-sm font-medium leading-snug whitespace-pre-wrap">
@@ -499,7 +499,7 @@ export default function MemoryGame() {
       {isGameStarted && (
         <div
           className="rounded-2xl border p-4 mb-8"
-          style={{ backgroundColor: activeBarBg, borderColor: "#e5e7eb" }}
+          style={{ backgroundColor: activeBarBg, borderColor: "#374151" }}
         >
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <div className="flex items-center gap-3">
