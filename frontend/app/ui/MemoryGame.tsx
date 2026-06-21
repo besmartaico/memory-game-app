@@ -64,6 +64,10 @@ export default function MemoryGame() {
   const [setupFirst, setSetupFirst] = useState<0 | 1>(0);
   const [isGameStarted, setIsGameStarted] = useState(false);
 
+  const [contentUrl, setContentUrl] = useState<string>("");
+  const [requireQuestionFirst, setRequireQuestionFirst] = useState<boolean>(true);
+  const [aiLoading, setAiLoading] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   // --- data ---
   const [rows, setRows] = useState<CardRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -162,6 +166,39 @@ export default function MemoryGame() {
       mismatchDurationRef.current = mismatchRemainingMs;
     }
   }, [zoomed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function generateFromUrl() {
+    if (!contentUrl.trim()) return;
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 2000,
+          messages: [{
+            role: "user",
+            content: "Fetch the content from this URL and generate exactly 15 question and answer pairs for a memory matching game. URL: " + contentUrl.trim() + "\n\nReturn ONLY a JSON array with no other text or markdown, where each element has \"question\" and \"answer\" string fields. Keep each under 10 words."
+          }],
+          tools: [{ type: "web_search_20250305", name: "web_search" }]
+        })
+      });
+      const aiData = await aiRes.json();
+      const textBlock = aiData.content?.find((b: any) => b.type === "text");
+      const rawText = textBlock?.text ?? "";
+      const clean = rawText.replace(/```json|```/g, "").trim();
+      const pairs: Array<{question: string; answer: string}> = JSON.parse(clean);
+      const cards: CardRow[] = pairs.map((p, i) => ({ id: String(i + 1), question: p.question, answer: p.answer }));
+      setRows(cards);
+      setFetchErr(null);
+    } catch (e: any) {
+      setAiError(e?.message ?? "Failed to generate from URL");
+    } finally {
+      setAiLoading(false);
+    }
+  }
 
   async function fetchCards() {
     setLoading(true);
@@ -279,6 +316,8 @@ export default function MemoryGame() {
       if (selectedQ) return; // already have a question selected
       setSelectedQ(tile);
     } else {
+      // If requireQuestionFirst is on, block answer selection until a Q is selected
+      if (requireQuestionFirst && !selectedQ) return;
       if (selectedA) return; // already have an answer selected
       setSelectedA(tile);
     }
@@ -398,6 +437,44 @@ export default function MemoryGame() {
       {/* Setup Panel */}
       {!isGameStarted && (
         <div className="border rounded-2xl p-5 mb-8 bg-white shadow-sm">
+
+          {/* URL Content Generator */}
+          <div className="mb-4 space-y-2">
+            <label className="text-sm font-medium">Generate cards from URL (optional)</label>
+            <div className="flex gap-2">
+              <input
+                value={contentUrl}
+                onChange={(e) => setContentUrl(e.target.value)}
+                className="flex-1 border rounded-lg px-3 py-2 text-sm"
+                placeholder="https://example.com/article"
+              />
+              <button
+                type="button"
+                onClick={generateFromUrl}
+                disabled={!contentUrl.trim() || aiLoading}
+                className="px-4 py-2 rounded-lg text-sm text-white disabled:opacity-50"
+                style={{ backgroundColor: "#111827" }}
+              >
+                {aiLoading ? "Generating…" : "Generate Q&A"}
+              </button>
+            </div>
+            {aiError && <div className="text-xs text-red-600">{aiError}</div>}
+          </div>
+
+          {/* Question-first toggle */}
+          <div className="mb-4 flex items-center gap-3">
+            <input
+              id="requireQFirst"
+              type="checkbox"
+              checked={requireQuestionFirst}
+              onChange={(e) => setRequireQuestionFirst(e.target.checked)}
+              className="w-4 h-4"
+            />
+            <label htmlFor="requireQFirst" className="text-sm font-medium">
+              Require question to be selected before answer
+            </label>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
             <div className="space-y-2">
               <label className="text-sm font-medium">Team 1 Name</label>
