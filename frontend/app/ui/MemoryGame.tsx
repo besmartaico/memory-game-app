@@ -363,7 +363,7 @@ export default function MemoryGame() {
             style={{ backgroundColor: frontBg, borderColor: "#000000" }}
           >
             <div className="h-full w-full overflow-hidden">
-              <div className="text-xs sm:text-sm font-medium leading-snug whitespace-pre-wrap">
+              <div className="text-xs sm:text-sm font-medium leading-snug whitespace-pre-wrap text-black">
                 {tile.text}
               </div>
             </div>
